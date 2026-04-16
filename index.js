@@ -27,6 +27,6 @@ app.use("/api/billing",billingRouter)
 
 
 app.listen(port,()=>{
-    console.log("server started")
+    console.log("server started",port)
     connectDb()
 })

@@ -2,6 +2,7 @@ import { generateResponse } from "../config/openRouter.js";
 import User from "../models/user.model.js";
 import Website from "../models/website.model.js";
 import extractJson from "../utils/extractJson.js";
+import redis from "../config/redisclient.js";
 
 const masterPrompt = `
 YOU ARE A PRINCIPAL FRONTEND ARCHITECT
@@ -203,6 +204,11 @@ export const generateWebsite = async (req, res) => {
             ]
         })
 
+        await redis.del(`user:${user._id}:websites`);
+       if (website.isPublic) {
+  await redis.del("community:projects");
+}
+
         user.credits = user.credits - 50
         await user.save()
 
@@ -301,6 +307,12 @@ RETURN RAW JSON ONLY:
         website.latestCode = parsed.code
 
         await website.save()
+
+
+        await redis.del(`user:${req.user._id}:websites`);
+        if (website.isPublic) {
+  await redis.del("community:projects");
+}
         user.credits = user.credits - 25
         await user.save()
 
@@ -319,14 +331,34 @@ RETURN RAW JSON ONLY:
 
 
 
-export const getAll=async (req,res) => {
-    try {
-        const websites=await Website.find({user:req.user._id})
-        return res.status(200).json(websites)
-    } catch (error) {
-        return res.status(500).json({ message: `get all websites error ${error}` })
+export const getAll = async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    const key = `user:${userId}:websites`;
+
+    // 🔹 1. Check Redis
+    const cache = await redis.get(key);
+
+    if (cache) {
+      console.log(`⚡ CACHE HIT for user ${userId}`);
+      return res.status(200).json(JSON.parse(cache));
     }
-}
+
+    console.log(`❌ CACHE MISS for user ${userId}`);
+
+    // 🔹 2. DB call
+    const websites = await Website.find({ user: userId });
+
+    // 🔹 3. Store in Redis (TTL 60 sec)
+    await redis.set(key, JSON.stringify(websites), "EX", 60);
+
+    return res.status(200).json(websites);
+
+  } catch (error) {
+    return res.status(500).json({ message: `get all websites error ${error}` });
+  }
+};
 
 
 export const deploy=async (req,res)=>{
