@@ -1,6 +1,7 @@
 import { generateResponse } from "../config/openRouter.js"
 import Website from "../models/website.model.js"
 import extractJson from "../utils/extractJson.js"
+import {redis} from "../config/redisClient.js";
 
 export const getCurrentUser=async (req,res)=>{
     try {
@@ -48,18 +49,44 @@ export const togglePublic = async (req, res) => {
 
 // Community — sirf isPublic: true wali websites
 export const getCommunityWebsites = async (req, res) => {
+  try {
+    const key = "community:projects";
+
+    // 🔹 1. cache check
+    let cache = null;
+
     try {
-        const websites = await Website.find({ isPublic: true })
-            .populate('user', 'name avatar')
-            .sort({ updatedAt: -1 })
-
-        res.status(200).json(websites)
-
-    } catch (error) {
-        console.log(error)
-        res.status(500).json({ message: "Something went wrong" })
+      cache = await redis.get(key);
+    } catch (err) {
+      console.log("Redis GET error:", err);
     }
-}
+
+    if (cache) {
+      console.log("⚡ COMMUNITY CACHE HIT");
+      return res.status(200).json(cache);
+    }
+
+    console.log("❌ COMMUNITY CACHE MISS");
+
+    // 🔹 2. DB call
+    const websites = await Website.find({ isPublic: true })
+      .populate("user", "name avatar")
+      .sort({ updatedAt: -1 });
+
+    // 🔹 3. cache set
+    try {
+      await redis.set(key, websites, { ex: 60 });
+    } catch (err) {
+      console.log("Redis SET error:", err);
+    }
+
+    return res.status(200).json(websites);
+
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({ message: "Something went wrong" });
+  }
+};
 
 // =============================
 // CONTROLLER — user.controllers.js mein add karo

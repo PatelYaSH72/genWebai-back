@@ -2,7 +2,9 @@ import { generateResponse } from "../config/openRouter.js";
 import User from "../models/user.model.js";
 import Website from "../models/website.model.js";
 import extractJson from "../utils/extractJson.js";
-import redis from "../config/redisclient.js";
+import {redis} from "../config/redisClient.js";
+
+
 
 const masterPrompt = `
 YOU ARE A PRINCIPAL FRONTEND ARCHITECT
@@ -154,73 +156,79 @@ ABSOLUTE RULES
 
 
 export const generateWebsite = async (req, res) => {
-    try {
-        const { prompt } = req.body
-        if (!prompt) {
-            return res.status(400).json({ message: "prompt is required" })
-        }
-        const user = await User.findById(req.user._id)
+    const cache = await redis.get("key");
+  try {
+    const { prompt } = req.body;
 
-        if (!user) {
-            return res.status(400).json({ message: "user not found" })
-        }
-        if (user.credits < 50) {
-            return res.status(400).json({ message: "you have not enough credits to generate a webiste" })
-        }
-
-        const finalPrompt = masterPrompt.replace("USER_PROMPT", prompt)
-        let raw = ""
-        let parsed = null
-        for (let i = 0; i < 2 && !parsed; i++) {
-            raw = await generateResponse(finalPrompt)
-            parsed = await extractJson(raw)
-
-            if (!parsed) {
-                raw = await generateResponse(finalPrompt + "\n\nRETURN ONLY RAW JSON.")
-                parsed = await extractJson(raw)
-            }
-
-        }
-
-        if (!parsed.code) {
-            console.log("ai returned invalid response", raw)
-            return res.status(400).json({ message: "ai returned invalid response" })
-        }
-
-        const website = await Website.create({
-            user: user._id,
-            title: prompt.slice(0, 60),
-            latestCode: parsed.code,
-            conversation: [
-                {
-                    role: "user",
-                    content: prompt
-                },
-                {
-                    role: "ai",
-                    content: parsed.message
-                }
-                
-            ]
-        })
-
-        await redis.del(`user:${user._id}:websites`);
-       if (website.isPublic) {
-  await redis.del("community:projects");
-}
-
-        user.credits = user.credits - 50
-        await user.save()
-
-        return res.status(201).json({
-            websiteId: website._id,
-            remainingCredits: user.credits
-        })
-
-    } catch (error) {
-        return res.status(500).json({ message: `generate website error ${error}` })
+    if (!prompt) {
+      return res.status(400).json({ message: "prompt is required" });
     }
-}
+
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+      return res.status(400).json({ message: "user not found" });
+    }
+
+    if (user.credits < 50) {
+      return res.status(400).json({ message: "not enough credits" });
+    }
+
+    const finalPrompt = masterPrompt.replace("USER_PROMPT", prompt);
+
+    let raw = "";
+    let parsed = null;
+
+    for (let i = 0; i < 2 && !parsed; i++) {
+      raw = await generateResponse(finalPrompt);
+      parsed = await extractJson(raw);
+
+      if (!parsed) {
+        raw = await generateResponse(finalPrompt + "\n\nRETURN ONLY RAW JSON.");
+        parsed = await extractJson(raw);
+      }
+    }
+
+    if (!parsed?.code) {
+      console.log("AI invalid response:", raw);
+      return res.status(400).json({ message: "AI returned invalid response" });
+    }
+
+    const website = await Website.create({
+      user: user._id,
+      title: prompt.slice(0, 60),
+      latestCode: parsed.code,
+      conversation: [
+        { role: "user", content: prompt },
+        { role: "ai", content: parsed.message }
+      ]
+    });
+
+    // 🔥 Redis cache invalidation (safe way)
+    try {
+      await redis.del(`user:${user._id}:websites`);
+
+      if (website.isPublic) {
+        await redis.del("community:projects");
+      }
+    } catch (redisError) {
+      console.log("Redis error (non-blocking):", redisError);
+    }
+
+    user.credits -= 50;
+    await user.save();
+
+    return res.status(201).json({
+      websiteId: website._id,
+      remainingCredits: user.credits
+    });
+
+  } catch (error) {
+    return res.status(500).json({
+      message: `generate website error: ${error.message}`
+    });
+  }
+};
 
 
 export const getWebsiteById = async (req, res) => {
@@ -241,6 +249,7 @@ export const getWebsiteById = async (req, res) => {
 
 
 export const changes = async (req, res) => {
+    const cache = await redis.get("key");
     try {
         const { prompt } = req.body
         if (!prompt) {
@@ -334,15 +343,20 @@ RETURN RAW JSON ONLY:
 export const getAll = async (req, res) => {
   try {
     const userId = req.user._id;
-
     const key = `user:${userId}:websites`;
 
-    // 🔹 1. Check Redis
-    const cache = await redis.get(key);
+    // 🔹 1. Check Redis (safe)
+    let cache = null;
+
+    try {
+      cache = await redis.get(key);
+    } catch (err) {
+      console.log("Redis GET error:", err);
+    }
 
     if (cache) {
       console.log(`⚡ CACHE HIT for user ${userId}`);
-      return res.status(200).json(JSON.parse(cache));
+      return res.status(200).json(cache);
     }
 
     console.log(`❌ CACHE MISS for user ${userId}`);
@@ -350,16 +364,22 @@ export const getAll = async (req, res) => {
     // 🔹 2. DB call
     const websites = await Website.find({ user: userId });
 
-    // 🔹 3. Store in Redis (TTL 60 sec)
-    await redis.set(key, JSON.stringify(websites), "EX", 60);
+    // 🔹 3. Store in Redis (non-blocking)
+    try {
+      await redis.set(key, websites, { ex: 60 });
+    } catch (err) {
+      console.log("Redis SET error:", err);
+    }
 
     return res.status(200).json(websites);
 
   } catch (error) {
-    return res.status(500).json({ message: `get all websites error ${error}` });
+    console.log("Controller error:", error);
+    return res.status(500).json({
+      message: `get all websites error ${error.message}`
+    });
   }
 };
-
 
 export const deploy=async (req,res)=>{
     try {
