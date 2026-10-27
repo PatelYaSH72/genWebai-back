@@ -28,6 +28,12 @@ app.use("/api/auth",authRouter)
 app.use("/api/user",userRouter)
 app.use("/api/website",websiteRouter)
 app.use("/api/billing",billingRouter)
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Backend is running',
+  })
+})
 
 app.listen(port,()=>{
     console.log("server started",port)
